@@ -1,0 +1,96 @@
+[tool.poetry]
+name = "ml-platform"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.11"
+category-encoders = "^2.6.3"
+logging = "^0.4.9.6"
+flask = "^3.0.3"
+pandas = "^2.2.2"
+numpy = "^2.0.1"
+xgboost = "^2.0.3"
+plotly = "^6.0.0"
+lightgbm = "^4.6.0"
+bayesian-optimization = "^2.0.3"
+scikit-optimize = "^0.10.2"
+optuna = "^4.2.1"
+graphviz = "^0.20.3"
+xlsxwriter = "^3.2.3"
+catboost = "^1.2.8"
+pyproj = "^3.7.1"
+geopy = "^2.4.1"
+shapely = "^2.1.2"
+geopandas = "^1.1.1"
+contextily = "^1.6.2"
+
+[tool.poetry.group.dev.dependencies]
+google-cloud = "^0.34.0"
+google-cloud-bigquery = {extras = ["pandas"], version = "^3.25.0"}
+jupyter = "^1.0.0"
+pydata-google-auth = "^1.8.2"
+pytest = "^8.3.2"
+pytest-sugar = "^1.0.0"
+pytest-xdist = "^3.6.1"
+scikit-learn = "^1.5.0"
+setuptools = "^70.0.0"
+shap = "^0.46.0"
+ydata-profiling = "^4.8.3"
+nbqa = {extras = ["toolchain"], version = "^1.9.0"}
+boto3 = "^1.35.24"
+pyhumps = "^3.8.0"
+
+[tool.pytest.ini_options]
+log_cli_level = "CRITICAL"
+log_level = "INFO"
+markers = [
+    "system: system tests, run in pipeline against test env",
+]
+norecursedirs = [
+  "docs",
+  ".github",
+  ".mympy_cache",
+  ".pytest_cache",
+  "scripts",
+  "tests/factories",
+  "cdk.out",
+  ".venv",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  "notebooks",
+]
+pythonpath = [
+  "src"
+]
+
+[tool.ruff.lint]
+ignore = [
+  "E501", # Line length
+  "PLR2004", # Replace magic value with constant
+  "PLR0913", # Too many arguments to function call
+  "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
+]
+select = [
+  "A", # Flake8 builtins
+  "C4", # Flake8 Comprensions
+  "E", # PEP8 errors
+  "W", # PEP8 warnings
+  "F", # PyFlakes
+  "I", # Isort
+  "PL", # Pylint
+  "Q", # Flake8-quotes
+  "RET", # Pylint return statements
+  "RUF", # Ruff conventions
+  "SIM", # Flake8 Simplify
+  "SLF", # Access private members
+  "T10", # Flake8 debugger
+  "UP" # Pyupgrade
+]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

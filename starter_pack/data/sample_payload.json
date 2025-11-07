@@ -1,0 +1,104 @@
+{
+  "claims": [
+    {
+      "id_loss": 1001,
+      "claim_amount": 450.75,
+      "pet_breed": "labrador",
+      "pet_species": "dog",
+      "owner_age": 39,
+      "number_of_previous_claims": 0,
+      "days_to_claim": 3,
+      "policy_tenure": 12
+    },
+    {
+      "id_loss": 1002,
+      "claim_amount": 1250.40,
+      "pet_breed": "persian",
+      "pet_species": "cat",
+      "owner_age": 52,
+      "number_of_previous_claims": 2,
+      "days_to_claim": 8,
+      "policy_tenure": 36
+    },
+    {
+      "id_loss": 1003,
+      "claim_amount": 320.10,
+      "pet_breed": "spaniel",
+      "pet_species": "dog",
+      "owner_age": 27,
+      "number_of_previous_claims": 1,
+      "days_to_claim": 1,
+      "policy_tenure": 18
+    },
+    {
+      "id_loss": 1004,
+      "claim_amount": 2890.00,
+      "pet_breed": "bengal",
+      "pet_species": "cat",
+      "owner_age": 44,
+      "number_of_previous_claims": 4,
+      "days_to_claim": 14,
+      "policy_tenure": 48
+    },
+    {
+      "id_loss": 1005,
+      "claim_amount": 750.30,
+      "pet_breed": "retriever",
+      "pet_species": "dog",
+      "owner_age": 63,
+      "number_of_previous_claims": 3,
+      "days_to_claim": 5,
+      "policy_tenure": 60
+    },
+    {
+      "id_loss": 1006,
+      "claim_amount": 210.25,
+      "pet_breed": "poodle",
+      "pet_species": "dog",
+      "owner_age": 33,
+      "number_of_previous_claims": 0,
+      "days_to_claim": 2,
+      "policy_tenure": 6
+    },
+    {
+      "id_loss": 1007,
+      "claim_amount": 1580.00,
+      "pet_breed": "ragdoll",
+      "pet_species": "cat",
+      "owner_age": 41,
+      "number_of_previous_claims": 1,
+      "days_to_claim": 10,
+      "policy_tenure": 24
+    },
+    {
+      "id_loss": 1008,
+      "claim_amount": 980.60,
+      "pet_breed": "bulldog",
+      "pet_species": "dog",
+      "owner_age": 56,
+      "number_of_previous_claims": 2,
+      "days_to_claim": 4,
+      "policy_tenure": 30
+    },
+    {
+      "id_loss": 1009,
+      "claim_amount": 560.00,
+      "pet_breed": "siamese",
+      "pet_species": "cat",
+      "owner_age": 24,
+      "number_of_previous_claims": 0,
+      "days_to_claim": 6,
+      "policy_tenure": 10
+    },
+    {
+      "id_loss": 1010,
+      "claim_amount": 1840.50,
+      "pet_breed": "retriever",
+      "pet_species": "dog",
+      "owner_age": 47,
+      "number_of_previous_claims": 5,
+      "days_to_claim": 18,
+      "policy_tenure": 42
+    }
+  ]
+}

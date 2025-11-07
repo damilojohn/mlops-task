@@ -1,0 +1,98 @@
+openapi: 3.0.0
+info:
+  title: ManyPets Leakage Model API
+  version: 1.0.0
+  description: |
+    API for serving the ManyPets leakage classification model.
+    Provides endpoints for health checks and predicting leakage probability
+    for insurance claims.
+
+servers:
+  - url: http://localhost:8000
+
+paths:
+  /healthz:
+    get:
+      summary: Health check endpoint
+      description: Returns the operational status of the model service.
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  model_version:
+                    type: string
+                    example: v1
+
+  /predict:
+    post:
+      summary: Predict leakage probability for one or more claims
+      description: Accepts a JSON payload with claim details and returns predicted leakage probabilities.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                claims:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id_loss:
+                        type: integer
+                        example: 1001
+                      claim_amount:
+                        type: number
+                        format: float
+                        example: 450.75
+                      pet_breed:
+                        type: string
+                        example: labrador
+                      pet_species:
+                        type: string
+                        enum: [dog, cat]
+                        example: dog
+                      owner_age:
+                        type: integer
+                        example: 42
+                      number_of_previous_claims:
+                        type: integer
+                        example: 2
+                      days_to_claim:
+                        type: integer
+                        example: 5
+                      policy_tenure:
+                        type: integer
+                        example: 12
+      responses:
+        '200':
+          description: Predicted leakage probabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  predictions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id_loss:
+                          type: integer
+                          example: 1001
+                        leakage_probability:
+                          type: number
+                          format: float
+                          example: 0.37
+        '400':
+          description: Invalid input schema
+        '500':
+          description: Internal server error
