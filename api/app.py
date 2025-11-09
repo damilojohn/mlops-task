@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastTAPI, APIRouter
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 import structlog
 
@@ -32,8 +32,7 @@ async def lifespan(
     
     finally:
         #close model class
-    
-    LOG.info("Prediction API shutting down.....")
+        LOG.info("Prediction API shutting down.....")
 
 
 def create_app() -> FastAPI:

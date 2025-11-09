@@ -27,6 +27,9 @@ geopy = "^2.4.1"
 shapely = "^2.1.2"
 geopandas = "^1.1.1"
 contextily = "^1.6.2"
+fastapi = "^0.121.1"
+uvicorn = "^0.38.0"
+structlog = "^25.5.0"
 
 [tool.poetry.group.dev.dependencies]
 google-cloud = "^0.34.0"
