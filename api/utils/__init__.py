@@ -8,16 +8,15 @@ class ModelTypes(str, Enum):
 
 
 class Model:
-    def __init__(self, model_type:ModelTypes):
+    def __init__(self, model_type: ModelTypes):
         self.model_type = model_type
-        self.model = self._load_model_registry()
+        self.model = self._load_model_from_registry()
 
     def _load_model_from_registry(self):
         #code to pull model from GCP Model Registry
         pass
 
     def predict(self, data: ClaimsRequest):
-        #mock data
-        return [{"id_loss":x, ""
-        "leakage_probability": 0.1} for x in range(1000)]
+        # mock data
+        return [{"id_loss": x, "leakage_probability": 0.2} for x in range(1000)]
 

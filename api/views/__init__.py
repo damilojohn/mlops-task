@@ -2,7 +2,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 from api.schemas import HealthCheckResponse
 
-base_router = APIRouter(prefix="api/v1")
+base_router = APIRouter(prefix="/api/v1")
 
 
 @base_router.get("/healthz",
