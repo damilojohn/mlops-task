@@ -41,3 +41,6 @@ y_prob = model.predict_proba(X_test)[:, 1]
 
 print(classification_report(y_test, y_pred))
 print("ROC AUC:", roc_auc_score(y_test, y_prob).round(3))
+
+
+# serialize and push model to model registry
