@@ -1,4 +1,4 @@
-FROM python-3.12:slim AS builder
+FROM python-3.10:slim AS builder
 
 
 WORKDIR /usr/app/server/
@@ -7,13 +7,14 @@ RUN apt-get update \
     && apt-get --no-install-recommends install -y \
     build-essential \
     && apt-get-clean \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && pip install poetry
 
-COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 
-COPY .pyproject.toml uv.lock /usr/app/server/
 
-RUN uv sync --only-group apiserver
+COPY .pyproject.toml poetry.lock /usr/app/server/
+
+RUN poetry install
 
 COPY /api /usr/app/server/api
 
@@ -27,6 +28,8 @@ COPY --from=builder /usr/app/server/pyproject.toml /usr/app/server/pyproject.tom
 COPY --from=builder /usr/app/server/uv.lock /usr/app/server/uv.lock
 
 ENV PATH="/usr/app/server/.venv/bin:$PATH"
+
+RUN poetry env activate
 
 EXPOSE 8000
 
