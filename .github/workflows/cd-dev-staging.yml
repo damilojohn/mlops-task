@@ -1,8 +1,10 @@
 name: CD - Deploy to Dev & Staging
 
 on:
-  push:
-    branches: [main]
+   workflow_run:
+    workflows: ["CI - Pull Request Checks"]
+    types:
+      - completed
   workflow_dispatch:  # Allow manual trigger
     inputs:
       skip_dev:
@@ -18,11 +20,13 @@ on:
 
 env:
   TERRAFORM_VERSION: '1.5.7'
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: '3.10'
   GCP_REGION: 'europe-west2'
+  DEV_MODEL_BUCKET: 'manypets-ml-artifacts-dev'
+  STAGING_MODEL_BUCKET: 'manypets-ml-artifacts-staging'
 
 jobs:
-  # Job 1: Build and Push Docker Images
+  # Job 1: Build and Push Docker Images (No changes needed, kept for context)
   build-and-push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
@@ -33,7 +37,7 @@ jobs:
     
     outputs:
       training_image_tag: ${{ steps.meta-training.outputs.tags }}
-      api_image_tag: ${{ steps.meta-api.outputs.tags }}
+      api_image_tag: ${{ steps.prediction_service.outputs.tags }}
       image_version: ${{ steps.version.outputs.version }}
     
     steps:
@@ -76,8 +80,8 @@ jobs:
       - name: Build and push training image
         uses: docker/build-push-action@v5
         with:
-          context: models/claim-leakage/training
-          file: models/claim-leakage/training/Dockerfile
+          context: ml/training
+          file: ml/training/Dockerfile
           push: true
           tags: ${{ steps.meta-training.outputs.tags }}
           labels: ${{ steps.meta-training.outputs.labels }}
@@ -88,9 +92,9 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             GIT_COMMIT=${{ github.sha }}
       
-      # Build API Image
+      
       - name: Docker metadata for API image
-        id: meta-api
+        id: prediction_service
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/serving-images/prediction-api
@@ -105,8 +109,8 @@ jobs:
           context: api
           file: api/Dockerfile
           push: true
-          tags: ${{ steps.meta-api.outputs.tags }}
-          labels: ${{ steps.meta-api.outputs.labels }}
+          tags: ${{ steps.prediction_service.outputs.tags }}
+          labels: ${{ steps.prediction_service.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -116,13 +120,13 @@ jobs:
       
       - name: Summary
         run: |
-          echo "###  Docker Images Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "Docker Images Built Successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Training Image:** \`${{ steps.meta-training.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**API Image:** \`${{ steps.meta-api.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**API Image:** \`${{ steps.prediction_service.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
 
-  # Job 2: Deploy to Dev
+  # Job 2: Deploy to Dev (unchanged, kept for context)
   deploy-dev:
     name: Deploy to Dev
     runs-on: ubuntu-latest
@@ -154,14 +158,14 @@ jobs:
       
       - name: Terraform Init
         run: terraform init
-        working-directory: terraform/environments/dev
+        working-directory: terraform/envs/dev
       
       - name: Terraform Apply
         run: |
           terraform apply -auto-approve \
             -var="api_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/serving-images/prediction-api:${{ needs.build-and-push.outputs.image_version }}" \
             -var="training_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }}"
-        working-directory: terraform/environments/dev
+        working-directory: terraform/envs/dev
       
       - name: Get Cloud Run URL
         id: get-url
@@ -177,10 +181,10 @@ jobs:
       - name: Run smoke tests
         run: |
           # Health check
-          curl -f ${{ steps.get-url.outputs.url }}/health || exit 1
+          curl -f ${{ steps.get-url.outputs.url }}/healthz || exit 1
           
           # Test prediction endpoint (with dummy data)
-          curl -X POST ${{ steps.get-url.outputs.url }}/predict/claim-leakage \
+          curl -X POST ${{ steps.get-url.outputs.url }}/predict \
             -H "Content-Type: application/json" \
             -d '{"claim_amount": 1000, "policy_age": 12}' \
             -f || exit 1
@@ -189,7 +193,7 @@ jobs:
       
       - name: Deployment summary
         run: |
-          echo "###  Dev Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo " Dev Deployment Successful" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** Dev" >> $GITHUB_STEP_SUMMARY
           echo "**Service URL:** ${{ steps.get-url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
@@ -200,42 +204,63 @@ jobs:
     name: Train Model in Dev
     runs-on: ubuntu-latest
     needs: deploy-dev
+    if: ${{ !inputs.skip_dev }}
     
     permissions:
       contents: read
       id-token: write
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
       - name: Authenticate to Google Cloud (Dev)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          # Use the Service Account with Vertex AI Training/Storage permissions
           service_account: cicd-pipeline-dev@manypets-ml-dev.iam.gserviceaccount.com
           project_id: manypets-ml-dev
       
-      - name: Trigger Vertex AI Training Job
+      - name: Trigger Vertex AI Training Job (Custom Container)
+        id: trigger-job
         run: |
-          gcloud ai custom-jobs create \
+          # 1. Define variables
+          JOB_DISPLAY_NAME="leakage-train-dev-${{ needs.build-and-push.outputs.image_version }}"
+          CONTAINER_IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }}"
+          
+          # 2. Define the GCS output path dynamically
+          # The path includes the version and timestamp for unique model artifacts
+          GCS_MODEL_OUTPUT="gs://${{ env.DEV_MODEL_BUCKET }}/claim-outlier/models/${{ needs.build-and-push.outputs.image_version }}/model.pkl"
+          
+          echo "Training Image URI: $CONTAINER_IMAGE_URI"
+          echo "GCS Model Output Path: $GCS_MODEL_OUTPUT"
+
+          # 3. Trigger the job, passing the GCS path as an argument to your train.py script
+          # The 'command' must match the ENTRYPOINT/CMD in the Dockerfile
+          # The 'args' must match the argparse argument in your train.py script
+          JOB_ID=$(gcloud ai custom-jobs create \
             --region=${{ env.GCP_REGION }} \
-            --display-name="claim-leakage-training-${{ github.sha }}" \
-            --worker-pool-spec="machine-type=n1-standard-4,replica-count=1,container-image-uri=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }}" \
-            --service-account=vertex-ai-training-dev@manypets-ml-dev.iam.gserviceaccount.com
-      
+            --display-name="$JOB_DISPLAY_NAME" \
+            --worker-pool-spec="machine-type=n1-standard-4,replica-count=1,container-image-uri=$CONTAINER_IMAGE_URI,command='python,train.py',args='--gcs-output-path,$GCS_MODEL_OUTPUT'" \
+            --service-account=vertex-ai-training-dev@manypets-ml-dev.iam.gserviceaccount.com \
+            --format='value(name)')
+            
+          # Output the job name for the summary
+          echo "job_name=$JOB_DISPLAY_NAME" >> $GITHUB_OUTPUT
+          echo "gcs_path=$GCS_MODEL_OUTPUT" >> $GITHUB_OUTPUT
+
       - name: Training job summary
         run: |
-          echo "### 🎯 Training Job Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Training Job Triggered (Dev)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** Dev" >> $GITHUB_STEP_SUMMARY
-          echo "**Job Name:** \`claim-leakage-training-${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Job Name:** \`${{ steps.trigger-job.outputs.job_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Model Output:** \`${{ steps.trigger-job.outputs.gcs_path }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Check Vertex AI Jobs Console for progress."
 
-  # Job 4: Copy images to staging registry
+  # Job 4: Copy images to staging registry (unchanged)
   promote-images-to-staging:
     name: Promote Images to Staging
     runs-on: ubuntu-latest
-    needs: [build-and-push, deploy-dev, train-model-dev]
+    needs: [build-and-push, train-model-dev] # Depend on training job completion for dev environment
     if: ${{ !inputs.skip_staging }}
     
     permissions:
@@ -252,8 +277,8 @@ jobs:
       - name: Copy training image to staging
         run: |
           gcloud container images add-tag \
-            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }} \
-            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-dev/training-images/claim-outlier-training:${{ needs.build-and-push.outputs.image_version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-outlier-training:${{ needs.build-and-push.outputs.image_version }} \
             --quiet
       
       - name: Copy API image to staging
@@ -263,7 +288,7 @@ jobs:
             ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/serving-images/prediction-api:${{ needs.build-and-push.outputs.image_version }} \
             --quiet
 
-  # Job 5: Deploy to Staging
+  
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
@@ -295,14 +320,14 @@ jobs:
       
       - name: Terraform Init
         run: terraform init
-        working-directory: terraform/environments/staging
+        working-directory: terraform/envs/staging
       
       - name: Terraform Apply
         run: |
           terraform apply -auto-approve \
             -var="api_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/serving-images/prediction-api:${{ needs.build-and-push.outputs.image_version }}" \
             -var="training_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }}"
-        working-directory: terraform/environments/staging
+        working-directory: terraform/envs/staging
       
       - name: Get Cloud Run URL
         id: get-url
@@ -333,13 +358,13 @@ jobs:
       
       - name: Deployment summary
         run: |
-          echo "### Staging Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo " Staging Deployment Successful" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** Staging" >> $GITHUB_STEP_SUMMARY
           echo "**Service URL:** ${{ steps.get-url.outputs.url }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image Version:** \`${{ needs.build-and-push.outputs.image_version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🎉 **Ready for production deployment!**" >> $GITHUB_STEP_SUMMARY
+          echo "Ready for production deployment!" >> $GITHUB_STEP_SUMMARY
       
       - name: Notify team (Slack)
         if: always()
@@ -350,7 +375,7 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "{\"text\":\"Staging deployment successful! Version: \`${{ needs.build-and-push.outputs.image_version }}\` is ready for production approval.\"}"
 
-  # Job 6: Create GitHub Release
+  # Job 6: Create GitHub Release (unchanged, kept for context)
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
@@ -404,3 +429,58 @@ jobs:
             To deploy to production, run the "Deploy to Production" workflow manually.
           draft: false
           prerelease: false
+
+  # Job 7: Run Training Job in Staging (NEW)
+  train-model-staging:
+    name: Train Model in Staging
+    runs-on: ubuntu-latest
+    needs: deploy-staging # Depends on successful deployment to Staging
+    if: ${{ !inputs.skip_staging }}
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Authenticate to Google Cloud (Staging)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          # Use the Staging Service Account with Vertex AI Training/Storage permissions
+          service_account: cicd-pipeline-staging@manypets-ml-staging.iam.gserviceaccount.com
+          project_id: manypets-ml-staging # Assumes project ID is part of the SA email
+      
+      - name: Trigger Vertex AI Training Job (Custom Container)
+        id: trigger-job
+        run: |
+          # 1. Define variables
+          JOB_DISPLAY_NAME="leakage-train-staging-${{ needs.build-and-push.outputs.image_version }}"
+          CONTAINER_IMAGE_URI="${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-leakage-training:${{ needs.build-and-push.outputs.image_version }}"
+          
+          # 2. Define the GCS output path dynamically
+          # This model is the one that will ultimately be registered for Production
+          GCS_MODEL_OUTPUT="gs://${{ env.STAGING_MODEL_BUCKET }}/claim-leakage/models/${{ needs.build-and-push.outputs.image_version }}/model.pkl"
+          
+          echo "Training Image URI: $CONTAINER_IMAGE_URI"
+          echo "GCS Model Output Path: $GCS_MODEL_OUTPUT"
+
+          # 3. Trigger the job, passing the GCS path as an argument
+          JOB_ID=$(gcloud ai custom-jobs create \
+            --region=${{ env.GCP_REGION }} \
+            --display-name="$JOB_DISPLAY_NAME" \
+            --worker-pool-spec="machine-type=n1-standard-4,replica-count=1,container-image-uri=$CONTAINER_IMAGE_URI,command='python,train.py',args='--gcs-output-path,$GCS_MODEL_OUTPUT'" \
+            --service-account=vertex-ai-training-staging@manypets-ml-staging.iam.gserviceaccount.com \
+            --format='value(name)')
+            
+          # Output the job name for the summary
+          echo "job_name=$JOB_DISPLAY_NAME" >> $GITHUB_OUTPUT
+          echo "gcs_path=$GCS_MODEL_OUTPUT" >> $GITHUB_OUTPUT
+
+      - name: Training job summary
+        run: |
+          echo " Training Job Triggered (Staging)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Staging" >> $GITHUB_STEP_SUMMARY
+          echo "**Job Name:** \`${{ steps.trigger-job.outputs.job_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Model Output:** \`${{ steps.trigger-job.outputs.gcs_path }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Check Vertex AI Jobs Console for progress."

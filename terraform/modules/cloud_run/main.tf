@@ -75,7 +75,7 @@ resource "google_cloud_run_v2_service" "prediction_api" {
       startup_probe {
         http_get {
           path = "/health"
-          port = 8080
+          port = 8000
         }
         initial_delay_seconds = 10
         timeout_seconds       = 3
@@ -86,7 +86,7 @@ resource "google_cloud_run_v2_service" "prediction_api" {
       liveness_probe {
         http_get {
           path = "/health"
-          port = 8080
+          port = 8000
         }
         initial_delay_seconds = 30
         timeout_seconds       = 3
@@ -97,7 +97,7 @@ resource "google_cloud_run_v2_service" "prediction_api" {
       # Port
       ports {
         name           = "http1"
-        container_port = 8080
+        container_port = 8000
       }
     }
     

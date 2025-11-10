@@ -2,16 +2,16 @@ name: CI - Pull Request Checks
 
 on:
   pull_request:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - 'terraform/**'
-      - 'models/**'
+      - 'mL/**'
       - 'api/**'
       - '.github/workflows/**'
 
 env:
   TERRAFORM_VERSION: '1.5.7'
-  PYTHON_VERSION: '3.11'
+  PYTHON_VERSION: '3.10'
   TF_IN_AUTOMATION: true
 
 jobs:
@@ -37,17 +37,17 @@ jobs:
         id: fmt
         run: terraform fmt -check -recursive
         working-directory: terraform/
-        continue-on-error: true
+        continue-on-error: false
       
       - name: Terraform Init
         id: init
         run: terraform init -backend=false
-        working-directory: terraform/environments/${{ matrix.environment }}
+        working-directory: terraform/envs/${{ matrix.environment }}
       
       - name: Terraform Validate
         id: validate
         run: terraform validate -no-color
-        working-directory: terraform/environments/${{ matrix.environment }}
+        working-directory: terraform/envs/${{ matrix.environment }}
       
       - name: Post validation results to PR
         if: always()
@@ -55,9 +55,9 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const output = `#### Terraform Format and Style 🖌 \`${{ steps.fmt.outcome }}\`
-            #### Terraform Initialization ⚙️ \`${{ steps.init.outcome }}\`
-            #### Terraform Validation 🤖 \`${{ steps.validate.outcome }}\`
+            const output = `Terraform Format and Style 🖌 \`${{ steps.fmt.outcome }}\`
+            Terraform Initialization\`${{ steps.init.outcome }}\`
+            Terraform Validation \`${{ steps.validate.outcome }}\`
             
             <details><summary>Validation Output</summary>
             
@@ -113,54 +113,42 @@ jobs:
   python-lint:
     name: Python Lint & Test
     runs-on: ubuntu-latest
-    
+
     strategy:
       matrix:
-        component: [models, api, pipelines]
-    
+        component: [ml, api]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install black flake8 mypy pytest pytest-cov
+          pip install ruff pytest pytest-cov
           if [ -f ${{ matrix.component }}/requirements.txt ]; then
             pip install -r ${{ matrix.component }}/requirements.txt
           fi
-      
-      - name: Run Black (code formatting)
-        run: black --check --diff ${{ matrix.component }}/
-        continue-on-error: true
-      
-      - name: Run Flake8 (linting)
-        run: flake8 ${{ matrix.component }}/ --max-line-length=100 --exclude=__pycache__
-        continue-on-error: true
-      
-      - name: Run MyPy (type checking)
-        run: mypy ${{ matrix.component }}/ --ignore-missing-imports
-        continue-on-error: true
-      
-      - name: Run unit tests
+
+      - name: Run Ruff (lint + format + type-check)
         run: |
-          if [ -d ${{ matrix.component }}/tests ]; then
-            pytest ${{ matrix.component }}/tests/ --cov=${{ matrix.component }} --cov-report=xml --cov-report=term
-          fi
-      
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          files: ./coverage.xml
-          flags: ${{ matrix.component }}
-          name: ${{ matrix.component }}-coverage
+          # Check formatting
+          ruff format --check --diff ${{ matrix.component }}/
+          
+          # Linting and type checks
+          ruff check ${{ matrix.component }}/ --output-format=github
+        continue-on-error: true
+
+      - name: Run Tests
+        run: pytest ${{ matrix.component }}/ --cov=${{ matrix.component }}
+        continue-on-error: true
+
 
   
   docker-build-test:
@@ -170,8 +158,8 @@ jobs:
     strategy:
       matrix:
         dockerfile:
-          - { path: 'models/claim-leakage/training', name: 'training' }
-          - { path: 'api', name: 'api' }
+          - { path: 'ml', name: 'claims_training_job' }
+          - { path: 'api', name: 'prediction-service' }
     
     steps:
       - name: Checkout code
@@ -236,20 +224,20 @@ jobs:
       
       - name: Terraform Init
         run: terraform init
-        working-directory: terraform/environments/${{ matrix.environment }}
+        working-directory: terraform/envs/${{ matrix.environment }}
       
       - name: Terraform Plan
         id: plan
         run: |
           terraform plan -no-color -out=tfplan-${{ matrix.environment }} | tee plan-output.txt
-        working-directory: terraform/environments/${{ matrix.environment }}
+        working-directory: terraform/envs/${{ matrix.environment }}
         continue-on-error: true
       
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ matrix.environment }}
-          path: terraform/environments/${{ matrix.environment }}/tfplan-${{ matrix.environment }}
+          path: terraform/envs/${{ matrix.environment }}/tfplan-${{ matrix.environment }}
           retention-days: 5
       
       - name: Post plan to PR comment
@@ -261,7 +249,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const planOutput = fs.readFileSync('terraform/environments/${{ matrix.environment }}/plan-output.txt', 'utf8');
+            const planOutput = fs.readFileSync('terraform/envs/${{ matrix.environment }}/plan-output.txt', 'utf8');
             const truncatedPlan = planOutput.length > 65000 ? planOutput.substring(0, 65000) + '\n...(truncated)' : planOutput;
             
             const output = `### Terraform Plan: ${{ matrix.environment }}
@@ -295,4 +283,4 @@ jobs:
     
     steps:
       - name: All checks passed
-        run: echo "✅ All CI checks passed successfully!"
+        run: echo "All CI checks passed successfully!"

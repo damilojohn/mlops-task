@@ -8,7 +8,7 @@ from api.service.model_predictions import predict_outlier_prob
 @base_router.post(
     path="/predict",
     response_model=PredictResponse,
-    description= "Predicted leakage probabilities"
+    description="Predicted leakage probabilities"
 )
 def predict(
     request: PredictRequest
@@ -27,6 +27,6 @@ def predict(
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=resp,
+        content=resp.model_dump(),
         media_type="application/json"
     )

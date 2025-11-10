@@ -13,7 +13,7 @@ class ClaimsRequest(BaseModel):
     claim_amount: float = 450.75
     pet_breed: str = "labrador"
     pet_species: PetSpecie = "dog"
-    owner_age: str = 42
+    owner_age: int = 42
     number_of_previous_claims: int = 2
     days_to_claim: int = 5
     policy_tenure: int = 12

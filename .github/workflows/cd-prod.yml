@@ -1,0 +1,450 @@
+name: CD - Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '1.0.0'
+        required: true
+        type: string
+      deployment_strategy:
+        description: 'Deployment strategy'
+        required: true
+        type: choice
+        options:
+          - blue-green
+          - canary
+          - immediate
+        default: blue-green
+      skip_tests:
+        description: 'Skip pre-deployment tests'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TERRAFORM_VERSION: '1.5.7'
+  GCP_REGION: 'europe-west2'
+  PROD_MODEL_BUCKET: 'manypets-ml-artifacts-prod'
+
+jobs:
+  
+  validate-deployment:
+    name: Validate Deployment
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Authenticate to Google Cloud (Staging)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: cicd-pipeline-staging@manypets-ml-staging.iam.gserviceaccount.com
+          project_id: manypets-ml-staging
+      
+      - name: Verify images exist in staging
+        run: |
+          echo "Verifying training image..."
+          gcloud container images describe \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-leakage-training:${{ inputs.version }} \
+            || exit 1
+          
+          echo "Verifying API image..."
+          gcloud container images describe \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/serving-images/prediction-api:${{ inputs.version }} \
+            || exit 1
+          
+          echo "All images verified in staging registry"
+      
+      - name: Run staging smoke tests
+        if: ${{ !inputs.skip_tests }}
+        run: |
+          STAGING_URL=$(gcloud run services describe claim-prediction-api-staging \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(status.url)')
+          
+          # Health check
+          curl -f $STAGING_URL/healthz || exit 1
+          
+          # Prediction test
+          curl -X POST $STAGING_URL/predict/claim-leakage \
+            -H "Content-Type: application/json" \
+            -d '{"claim_amount": 1000, "policy_age": 12}' \
+            -f || exit 1
+          
+          echo "Staging tests passed"
+
+  promote-images-to-prod:
+    name: Promote Images to Production
+    runs-on: ubuntu-latest
+    needs: validate-deployment
+    # 🌟 MANUAL APPROVAL GATE: This uses the GitHub environment protection
+    environment:
+      name: production # This environment must be configured in GitHub settings with "Required reviewers"
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+      
+      - name: Copy training image to production
+        run: |
+          gcloud container images add-tag \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/training-images/claim-leakage-training:${{ inputs.version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/training-images/claim-leakage-training:${{ inputs.version }} \
+            --quiet
+          
+          # Also tag as 'production' alias
+          gcloud container images add-tag \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/training-images/claim-leakage-training:${{ inputs.version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/training-images/claim-leakage-training:production \
+            --quiet
+      
+      - name: Copy API image to production
+        run: |
+          gcloud container images add-tag \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-staging/serving-images/prediction-api:${{ inputs.version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }} \
+            --quiet
+          
+          # Tag as 'production'
+          gcloud container images add-tag \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:production \
+            --quiet
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: promote-images-to-prod # Will run only after images are promoted (and approved)
+    environment:
+      name: production
+      url: https://claim-prediction-api.manypets.com
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Authenticate to Google Cloud (Production)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: cicd-pipeline-prod@manypets-ml-prod.iam.gserviceaccount.com
+          project_id: manypets-ml-prod
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/prod
+      
+      - name: Get current Cloud Run revision
+        id: current-revision
+        run: |
+          CURRENT_IMAGE=$(gcloud run services describe claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(spec.template.spec.containers[0].image)' || echo "none")
+          echo "current_image=$CURRENT_IMAGE" >> $GITHUB_OUTPUT
+      
+      - name: Deploy with Blue-Green strategy
+        if: inputs.deployment_strategy == 'blue-green'
+        run: |
+          echo "Deploying with Blue-Green strategy..."
+          
+          # Deploy new revision with no traffic
+          gcloud run deploy claim-prediction-api-prod \
+            --image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }} \
+            --region=${{ env.GCP_REGION }} \
+            --platform=managed \
+            --no-traffic \
+            --tag=candidate-${{ inputs.version }}
+          
+          # Get candidate URL
+          CANDIDATE_URL=$(gcloud run services describe claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(status.traffic[0].url)')
+          
+          # Test candidate revision
+          echo "Testing candidate revision at $CANDIDATE_URL"
+          curl -f $CANDIDATE_URL/healthz|| exit 1
+          
+          # Gradually shift traffic: 10% -> 50% -> 100%
+          echo "Shifting 10% traffic to new revision..."
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-tags=candidate-${{ inputs.version }}=10
+          
+          sleep 60  # Monitor for 1 minute
+          
+          echo "Shifting 50% traffic to new revision..."
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-tags=candidate-${{ inputs.version }}=50
+          
+          sleep 120  # Monitor for 2 minutes
+          
+          echo "Shifting 100% traffic to new revision..."
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-latest
+      
+      - name: Deploy with Canary strategy
+        if: inputs.deployment_strategy == 'canary'
+        run: |
+          echo "Deploying with Canary strategy..."
+          
+          # Deploy new revision with 5% traffic
+          gcloud run deploy claim-prediction-api-prod \
+            --image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }} \
+            --region=${{ env.GCP_REGION }} \
+            --platform=managed \
+            --tag=canary-${{ inputs.version }}
+          
+          # 5% traffic
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-tags=canary-${{ inputs.version }}=5
+          
+          sleep 300  # Monitor for 5 minutes
+          
+          # 25% traffic
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-tags=canary-${{ inputs.version }}=25
+          
+          sleep 300  # Monitor for 5 minutes
+          
+          # 100% traffic
+          gcloud run services update-traffic claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --to-latest
+      
+      - name: Deploy immediately
+        if: inputs.deployment_strategy == 'immediate'
+        run: |
+          echo "⚠️ Deploying immediately (100% traffic)"
+          
+          gcloud run deploy claim-prediction-api-prod \
+            --image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }} \
+            --region=${{ env.GCP_REGION }} \
+            --platform=managed
+      
+      - name: Update Terraform state
+        run: |
+          terraform apply -auto-approve \
+            -var="api_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:${{ inputs.version }}" \
+            -var="training_container_image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/training-images/claim-leakage-training:${{ inputs.version }}"
+        working-directory: terraform/environments/prod
+      
+      - name: Verify deployment
+        run: |
+          PROD_URL=$(gcloud run services describe claim-prediction-api-prod \
+            --region=${{ env.GCP_REGION }} \
+            --format='value(status.url)')
+          
+          # Health check
+          for i in {1..5}; do
+            curl -f $PROD_URL/healthz && break
+            echo "Retry $i/5..."
+            sleep 10
+          done
+          
+          # Prediction test
+          curl -X POST $PROD_URL/predict/claim-leakage \
+            -H "Content-Type: application/json" \
+            -d '{"claim_amount": 1000, "policy_age": 12}' \
+            -f || exit 1
+          
+          echo "Production deployment verified"
+      
+      - name: Tag previous version for rollback
+        if: steps.current-revision.outputs.current_image != 'none'
+        run: |
+          gcloud container images add-tag \
+            ${{ steps.current-revision.outputs.current_image }} \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:rollback-$(date +%Y%m%d-%H%M%S) \
+            --quiet
+      
+      - name: Deployment summary
+        run: |
+          echo " Production Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ inputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Strategy:** \`${{ inputs.deployment_strategy }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Previous Version:** \`${{ steps.current-revision.outputs.current_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 **Production is now serving version ${{ inputs.version }}**" >> $GITHUB_STEP_SUMMARY
+
+  
+  post-deployment-monitoring:
+    name: Post-Deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Authenticate to Google Cloud (Production)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: cicd-pipeline-prod@manypets-ml-prod.iam.gserviceaccount.com
+          project_id: manypets-ml-prod
+      
+      - name: Monitor error rate
+        run: |
+          echo "Monitoring error rate for 10 minutes..."
+          for i in {1..10}; do
+            ERROR_RATE=$(gcloud logging read \
+              "resource.type=\"cloud_run_revision\" \
+              resource.labels.service_name=\"claim-prediction-api-prod\" \
+              severity>=ERROR" \
+              --limit=100 \
+              --format="value(timestamp)" \
+              --freshness=1m | wc -l)
+            
+            echo "Minute $i: $ERROR_RATE errors"
+            
+            if [ $ERROR_RATE -gt 10 ]; then
+              echo "High error rate detected! Consider rollback."
+              exit 1
+            fi
+            
+            sleep 60
+          done
+          
+          echo "Error rate is within acceptable limits"
+      
+      - name: Check SLO compliance
+        run: |
+          # Query Cloud Monitoring for SLO compliance
+          gcloud monitoring time-series list \
+            --filter='metric.type="serviceruntime.googleapis.com/api/request_latencies"' \
+            --format=json \
+            --limit=10
+          
+          echo "SLO check complete"
+
+  
+  notify-team:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [deploy-production, post-deployment-monitoring]
+    if: always()
+    
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ needs.deploy-production.result }}"
+          if [ "$STATUS" == "success" ]; then
+            COLOR="good"
+            MESSAGE="Production deployment successful!"
+          else
+            COLOR="danger"
+            MESSAGE="Production deployment failed!"
+          fi
+          
+          curl -X POST $SLACK_WEBHOOK \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"attachments\": [{
+                \"color\": \"$COLOR\",
+                \"title\": \"Production Deployment\",
+                \"text\": \"$MESSAGE\",
+                \"fields\": [
+                  {\"title\": \"Version\", \"value\": \"${{ inputs.version }}\", \"short\": true},
+                  {\"title\": \"Strategy\", \"value\": \"${{ inputs.deployment_strategy }}\", \"short\": true},
+                  {\"title\": \"Triggered by\", \"value\": \"${{ github.actor }}\", \"short\": true}
+                ]
+              }]
+            }"
+      
+      - name: Send email notification
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "[ManyPets ML] Production Deployment - ${{ needs.deploy-production.result }}"
+          to: ml-ops-team@manypets.com
+          from: GitHub Actions <noreply@github.com>
+          body: |
+            Production deployment ${{ needs.deploy-production.result }}.
+            
+            Version: ${{ inputs.version }}
+            Strategy: ${{ inputs.deployment_strategy }}
+            Triggered by: ${{ github.actor }}
+            
+            View run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  
+  create-rollback:
+    name: Prepare Rollback
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Create rollback script
+        run: |
+          cat > rollback-${{ inputs.version }}.sh << 'EOF'
+          #!/bin/bash
+          # Rollback script for version ${{ inputs.version }}
+          # Created: $(date)
+          
+          echo "Rolling back to previous version..."
+          
+          # Find rollback image
+          ROLLBACK_IMAGE=$(gcloud container images list-tags \
+            ${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api \
+            --filter="tags:rollback*" \
+            --format="value(tags)" \
+            --limit=1)
+          
+          # Deploy rollback
+          gcloud run deploy claim-prediction-api-prod \
+            --image=${{ env.GCP_REGION }}-docker.pkg.dev/manypets-ml-prod/serving-images/prediction-api:$ROLLBACK_IMAGE \
+            --region=${{ env.GCP_REGION }} \
+            --platform=managed
+          
+          echo "Rollback complete!"
+          EOF
+          
+          chmod +x rollback-${{ inputs.version }}.sh
+      
+      - name: Commit rollback script
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add rollback-${{ inputs.version }}.sh
+          git commit -m "Add rollback script for version ${{ inputs.version }}"
+          git push
